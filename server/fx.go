@@ -76,6 +76,11 @@ func (s *Server) printBanner() {
 	fmt.Printf("  │  Swagger:  http://%s\n", swaggerAddr)
 	fmt.Printf("  │  Debug:    http://%s/debug/pprof/\n", debugAddr)
 	fmt.Printf("  │  Health:   http://%s/healthz\n", debugAddr)
+	if len(s.debugHandlers) > 0 {
+		for _, h := range s.debugHandlers {
+			fmt.Printf("  │  Custom:   http://%s%s\n", debugAddr, h.Pattern)
+		}
+	}
 	fmt.Println("  └──────────────────────────────────────────────┘")
 	fmt.Println()
 }

@@ -29,6 +29,12 @@ type GatewayRegistrator func(ctx context.Context, mux *runtime.ServeMux, server 
 // Option — функциональные опции для Server.
 type Option func(*Server)
 
+// DebugHandler — пользовательский обработчик для debug-сервера.
+type DebugHandler struct {
+	Pattern string
+	Handler http.Handler
+}
+
 // Server объединяет все 4 сервера: gRPC, HTTP gateway, Swagger, Debug.
 type Server struct {
 	cfg Config
@@ -37,6 +43,7 @@ type Server struct {
 	gatewayRegistrators []GatewayRegistrator
 	httpMiddleware      []func(http.Handler) http.Handler
 	debugMiddleware     []func(http.Handler) http.Handler
+	debugHandlers       []DebugHandler
 	grpcOptions         []grpc.ServerOption
 
 	grpcServer *grpc.Server
@@ -70,6 +77,13 @@ func WithHTTPMiddleware(mw ...func(http.Handler) http.Handler) Option {
 func WithDebugMiddleware(mw ...func(http.Handler) http.Handler) Option {
 	return func(s *Server) {
 		s.debugMiddleware = append(s.debugMiddleware, mw...)
+	}
+}
+
+// WithDebugHandler монтирует пользовательский HTTP handler на debug-сервер.
+func WithDebugHandler(pattern string, handler http.Handler) Option {
+	return func(s *Server) {
+		s.debugHandlers = append(s.debugHandlers, DebugHandler{Pattern: pattern, Handler: handler})
 	}
 }
 

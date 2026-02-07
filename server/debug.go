@@ -28,6 +28,11 @@ func (s *Server) initDebug(log *slog.Logger) {
 	r.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 	r.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
+	// Пользовательские хэндлеры
+	for _, h := range s.debugHandlers {
+		r.Handle(h.Pattern, h.Handler)
+	}
+
 	// Liveness/readiness для k8s
 	r.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
