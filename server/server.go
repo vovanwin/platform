@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
+	platformotel "github.com/vovanwin/platform/otel"
 	"google.golang.org/grpc"
 )
 
@@ -45,6 +46,11 @@ type Server struct {
 	debugMiddleware     []func(http.Handler) http.Handler
 	debugHandlers       []DebugHandler
 	grpcOptions         []grpc.ServerOption
+
+	otelCfg      *platformotel.Config
+	otelProvider *platformotel.Provider
+	httpRoutes   []string // роуты для per-route HTTP метрик
+	grpcMethods  []string // методы для per-method gRPC метрик
 
 	grpcServer *grpc.Server
 	httpServer *http.Server
@@ -91,6 +97,41 @@ func WithDebugHandler(pattern string, handler http.Handler) Option {
 func WithGRPCOptions(opts ...grpc.ServerOption) Option {
 	return func(s *Server) {
 		s.grpcOptions = append(s.grpcOptions, opts...)
+	}
+}
+
+// WithOtel включает автоматическую инициализацию OTEL при старте сервера.
+// При включении автоматически добавляются:
+//   - трейсы и метрики (TracerProvider + MeterProvider)
+//   - RecoveryMiddleware (panic recovery с записью в спан)
+//   - MetricsMiddleware (per-route HTTP метрики)
+//   - HTTPMiddleware (OTEL трейсинг HTTP)
+//   - otelgrpc StatsHandler (OTEL трейсинг gRPC)
+//   - /metrics endpoint на debug-сервере
+//   - graceful shutdown провайдеров при остановке
+func WithOtel(cfg platformotel.Config) Option {
+	return func(s *Server) {
+		s.otelCfg = &cfg
+	}
+}
+
+// WithHTTPRouteMetrics регистрирует HTTP роуты для отдельных per-route метрик.
+// Каждый роут получает собственные счётчики и гистограмму (без проблем с кардинальностью).
+// Формат: "METHOD /path" (напр. "GET /api/v1/users", "POST /api/v1/orders/{id}").
+// Требует WithOtel — без него опция игнорируется.
+func WithHTTPRouteMetrics(routes ...string) Option {
+	return func(s *Server) {
+		s.httpRoutes = append(s.httpRoutes, routes...)
+	}
+}
+
+// WithGRPCMethodMetrics регистрирует gRPC методы для отдельных per-method метрик.
+// Каждый метод получает собственные счётчики и гистограмму.
+// Формат: полный путь (напр. "/users.UserService/GetUser").
+// Требует WithOtel — без него опция игнорируется.
+func WithGRPCMethodMetrics(methods ...string) Option {
+	return func(s *Server) {
+		s.grpcMethods = append(s.grpcMethods, methods...)
 	}
 }
 

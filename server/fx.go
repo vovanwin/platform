@@ -5,8 +5,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 
+	"github.com/go-chi/chi/v5"
+	platformotel "github.com/vovanwin/platform/otel"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.uber.org/fx"
+	"google.golang.org/grpc"
 )
 
 // moduleParams — зависимости серверного модуля, включая группы регистраторов.
@@ -32,7 +37,10 @@ func NewModule(opts ...Option) fx.Option {
 			s.gatewayRegistrators = append(s.gatewayRegistrators, p.GatewayRegistrators...)
 
 			p.LC.Append(fx.Hook{
-				OnStart: func(_ context.Context) error {
+				OnStart: func(ctx context.Context) error {
+					if err := s.initOtel(ctx, p.Log); err != nil {
+						return fmt.Errorf("init otel: %w", err)
+					}
 					if err := s.initGRPC(p.Log); err != nil {
 						return err
 					}
@@ -49,11 +57,91 @@ func NewModule(opts ...Option) fx.Option {
 					_ = s.stopSwagger(ctx, p.Log)
 					_ = s.stopDebug(ctx, p.Log)
 					s.stopGRPC(p.Log)
+					s.stopOtel(ctx, p.Log)
 					return nil
 				},
 			})
 		}),
 	)
+}
+
+// initOtel инициализирует OTEL провайдеры и добавляет middleware, если WithOtel был вызван.
+func (s *Server) initOtel(ctx context.Context, log *slog.Logger) error {
+	if s.otelCfg == nil {
+		return nil
+	}
+
+	cfg := *s.otelCfg
+	provider := &platformotel.Provider{}
+
+	tp, err := platformotel.InitTracer(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("init tracer: %w", err)
+	}
+	provider.TracerProvider = tp
+
+	mp, err := platformotel.InitMeter(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("init meter: %w", err)
+	}
+	provider.MeterProvider = mp
+
+	s.otelProvider = provider
+
+	// Добавляем HTTP middleware (в начало цепочки: recovery → metrics → tracing → пользовательские)
+	otelMiddleware := []func(http.Handler) http.Handler{
+		platformotel.RecoveryMiddleware(cfg.ServiceName),
+		platformotel.MetricsMiddleware(cfg.ServiceName),
+		platformotel.HTTPMiddleware(cfg.ServiceName),
+	}
+	s.httpMiddleware = append(otelMiddleware, s.httpMiddleware...)
+
+	// Per-route HTTP метрики (отдельные инструменты на каждый роут)
+	if len(s.httpRoutes) > 0 {
+		rm := platformotel.NewRouteMetrics(cfg.ServiceName, s.httpRoutes)
+		chiRouteFunc := func(r *http.Request) string {
+			rctx := chi.RouteContext(r.Context())
+			if rctx != nil {
+				return rctx.RoutePattern()
+			}
+			return r.URL.Path
+		}
+		s.httpMiddleware = append(s.httpMiddleware, rm.Middleware(chiRouteFunc))
+	}
+
+	// Добавляем gRPC stats handler для трейсинга
+	s.grpcOptions = append(s.grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+
+	// Per-method gRPC метрики (отдельные инструменты на каждый метод)
+	if len(s.grpcMethods) > 0 {
+		gm := platformotel.NewGRPCMetrics(cfg.ServiceName, s.grpcMethods)
+		s.grpcOptions = append(s.grpcOptions,
+			grpc.ChainUnaryInterceptor(gm.UnaryInterceptor()),
+			grpc.ChainStreamInterceptor(gm.StreamInterceptor()),
+		)
+	}
+
+	// Монтируем /metrics на debug-сервер
+	s.debugHandlers = append(s.debugHandlers, DebugHandler{
+		Pattern: "/metrics",
+		Handler: platformotel.MetricsHandler(),
+	})
+
+	log.Info("OTEL инициализирован",
+		slog.String("service", cfg.ServiceName),
+		slog.String("endpoint", cfg.Endpoint),
+	)
+
+	return nil
+}
+
+func (s *Server) stopOtel(ctx context.Context, log *slog.Logger) {
+	if s.otelProvider != nil {
+		log.Info("OTEL провайдеры завершают работу...")
+		if err := s.otelProvider.Shutdown(ctx); err != nil {
+			log.Error("Ошибка при завершении OTEL", slog.String("error", err.Error()))
+		}
+	}
 }
 
 func (s *Server) printBanner() {
@@ -76,8 +164,14 @@ func (s *Server) printBanner() {
 	fmt.Printf("  │  Swagger:  http://%s\n", swaggerAddr)
 	fmt.Printf("  │  Debug:    http://%s/debug/pprof/\n", debugAddr)
 	fmt.Printf("  │  Health:   http://%s/healthz\n", debugAddr)
+	if s.otelCfg != nil {
+		fmt.Printf("  │  Metrics:  http://%s/metrics\n", debugAddr)
+	}
 	if len(s.debugHandlers) > 0 {
 		for _, h := range s.debugHandlers {
+			if h.Pattern == "/metrics" && s.otelCfg != nil {
+				continue // уже вывели выше
+			}
 			fmt.Printf("  │  Custom:   http://%s%s\n", debugAddr, h.Pattern)
 		}
 	}
