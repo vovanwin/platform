@@ -38,6 +38,10 @@ func NewModule(opts ...Option) fx.Option {
 
 			p.LC.Append(fx.Hook{
 				OnStart: func(ctx context.Context) error {
+					// Автоматически обнаруживаем gRPC методы до initOtel,
+					// чтобы per-method interceptors попали в grpcOptions до создания сервера.
+					s.discoverGRPCMethods(p.Log)
+
 					if err := s.initOtel(ctx, p.Log); err != nil {
 						return fmt.Errorf("init otel: %w", err)
 					}
@@ -65,6 +69,48 @@ func NewModule(opts ...Option) fx.Option {
 	)
 }
 
+// discoverGRPCMethods автоматически обнаруживает все gRPC методы из зарегистрированных сервисов.
+// Создаёт временный gRPC сервер, регистрирует все сервисы, извлекает методы через GetServiceInfo(),
+// и добавляет их в s.grpcMethods. Вызывается ДО initOtel, чтобы per-method interceptors
+// были включены в grpcOptions до создания настоящего gRPC сервера.
+func (s *Server) discoverGRPCMethods(log *slog.Logger) {
+	if s.otelCfg == nil || len(s.grpcRegistrators) == 0 {
+		return
+	}
+
+	// Создаём временный gRPC сервер только для обнаружения методов
+	tmpServer := grpc.NewServer()
+	for _, reg := range s.grpcRegistrators {
+		reg(tmpServer)
+	}
+
+	seen := make(map[string]struct{})
+	for _, m := range s.grpcMethods {
+		seen[m] = struct{}{}
+	}
+
+	var discovered int
+	for serviceName, info := range tmpServer.GetServiceInfo() {
+		for _, method := range info.Methods {
+			fullMethod := "/" + serviceName + "/" + method.Name
+			if _, ok := seen[fullMethod]; !ok {
+				s.grpcMethods = append(s.grpcMethods, fullMethod)
+				seen[fullMethod] = struct{}{}
+				discovered++
+			}
+		}
+	}
+
+	tmpServer.Stop()
+
+	if discovered > 0 {
+		log.Info("gRPC методы обнаружены автоматически",
+			slog.Int("discovered", discovered),
+			slog.Int("total", len(s.grpcMethods)),
+		)
+	}
+}
+
 // initOtel инициализирует OTEL провайдеры и добавляет middleware, если WithOtel был вызван.
 func (s *Server) initOtel(ctx context.Context, log *slog.Logger) error {
 	if s.otelCfg == nil {
@@ -88,11 +134,17 @@ func (s *Server) initOtel(ctx context.Context, log *slog.Logger) error {
 
 	s.otelProvider = provider
 
-	// Добавляем HTTP middleware (в начало цепочки: recovery → metrics → tracing → пользовательские)
+	// Запускаем сбор Go runtime метрик (goroutines, heap, GC)
+	if err := platformotel.StartRuntimeMetrics(); err != nil {
+		log.Warn("Не удалось запустить runtime метрики", slog.String("error", err.Error()))
+	}
+
+	// Добавляем HTTP middleware (в начало цепочки: recovery → metrics → tracing → trace_id header → пользовательские)
 	otelMiddleware := []func(http.Handler) http.Handler{
 		platformotel.RecoveryMiddleware(cfg.ServiceName),
 		platformotel.MetricsMiddleware(cfg.ServiceName),
 		platformotel.HTTPMiddleware(cfg.ServiceName),
+		platformotel.TraceIDMiddleware(),
 	}
 	s.httpMiddleware = append(otelMiddleware, s.httpMiddleware...)
 
@@ -109,10 +161,13 @@ func (s *Server) initOtel(ctx context.Context, log *slog.Logger) error {
 		s.httpMiddleware = append(s.httpMiddleware, rm.Middleware(chiRouteFunc))
 	}
 
-	// Добавляем gRPC stats handler для трейсинга
-	s.grpcOptions = append(s.grpcOptions, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	// Добавляем gRPC stats handler для трейсинга + trace_id в response headers
+	s.grpcOptions = append(s.grpcOptions,
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
+		grpc.ChainUnaryInterceptor(platformotel.TraceIDUnaryInterceptor()),
+	)
 
-	// Per-method gRPC метрики (отдельные инструменты на каждый метод)
+	// Per-method gRPC метрики (автоматически обнаруженные + ручные)
 	if len(s.grpcMethods) > 0 {
 		gm := platformotel.NewGRPCMetrics(cfg.ServiceName, s.grpcMethods)
 		s.grpcOptions = append(s.grpcOptions,

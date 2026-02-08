@@ -8,6 +8,7 @@ import (
 
 	"github.com/grafana/loki-client-go/loki"
 	slogloki "github.com/samber/slog-loki/v3"
+	platformotel "github.com/vovanwin/platform/otel"
 )
 
 // Options параметры для создания логгера.
@@ -22,6 +23,9 @@ type Options struct {
 	LokiURL string
 	// ServiceName имя сервиса для label service_name в Loki
 	ServiceName string
+	// TraceID если true — автоматически добавлять trace_id и span_id из контекста в каждую запись лога.
+	// Связывает логи с трейсами в Grafana/Tempo.
+	TraceID bool
 }
 
 // NewLogger создаёт slog.Logger и устанавливает его как глобальный (slog.Default).
@@ -68,6 +72,11 @@ func NewLogger(opts Options) (*slog.Logger, func()) {
 			handler = newMultiHandler(consoleHandler, lokiHandler)
 			closer = func() { lokiClient.Stop() }
 		}
+	}
+
+	// Оборачиваем в TraceIDHandler для связи логов с трейсами
+	if opts.TraceID {
+		handler = platformotel.NewTraceIDHandler(handler)
 	}
 
 	l := slog.New(handler)

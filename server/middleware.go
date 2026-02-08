@@ -33,7 +33,7 @@ func SlogRequestLogger(log *slog.Logger) func(http.Handler) http.Handler {
 			rw := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(rw, r)
 
-			log.Info("http request",
+			log.InfoContext(r.Context(), "http request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", rw.status),
