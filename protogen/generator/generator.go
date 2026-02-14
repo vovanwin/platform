@@ -13,6 +13,7 @@ type rpcMethod struct {
 	Name     string
 	Request  string
 	Response string
+	HTTPPath string
 }
 
 type service struct {
@@ -66,7 +67,7 @@ func Run(root, apiDir, outputDir, serverPkg string) error {
 
 			// generate controller.go if missing
 			if err := writeIfMissing(
-				filepath.Join(controllerDir, "controller.go"),
+				filepath.Join(controllerDir, "0_controller.go"),
 				genController(svc),
 			); err != nil {
 				return err
@@ -74,7 +75,7 @@ func Run(root, apiDir, outputDir, serverPkg string) error {
 
 			// generate module.go if missing
 			if err := writeIfMissing(
-				filepath.Join(controllerDir, "module.go"),
+				filepath.Join(controllerDir, "0_module.go"),
 				genModule(svc, goModule, serverPkg),
 			); err != nil {
 				return err
@@ -82,7 +83,12 @@ func Run(root, apiDir, outputDir, serverPkg string) error {
 
 			// generate method stubs for missing methods
 			for _, m := range svc.Methods {
-				fileName := CamelToSnake(m.Name) + ".go"
+				var fileName string
+				if m.HTTPPath != "" {
+					fileName = httpPathToFileName(m.HTTPPath) + ".go"
+				} else {
+					fileName = CamelToSnake(m.Name) + ".go"
+				}
 				if err := writeIfMissing(
 					filepath.Join(controllerDir, fileName),
 					genMethod(svc, m),
@@ -118,8 +124,10 @@ func absPath(root, p string) string {
 var (
 	reGoPackage = regexp.MustCompile(`option\s+go_package\s*=\s*"([^"]+)"`)
 	reService   = regexp.MustCompile(`service\s+(\w+)\s*\{`)
-	reRPC       = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*(\w+)\s*\)\s*returns\s*\(\s*(\w+)\s*\)`)
+	reRPC       = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*([\w.]+)\s*\)\s*returns\s*\(\s*([\w.]+)\s*\)\s*\{[^}]*?(?:get|post|put|delete|patch)\s*:\s*"([^"]+)"[^}]*\}`)
+	reRPCSimple = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*([\w.]+)\s*\)\s*returns\s*\(\s*([\w.]+)\s*\)`)
 	reModule    = regexp.MustCompile(`(?m)^module\s+(\S+)`)
+	rePathParam = regexp.MustCompile(`\{[^}]+\}`)
 )
 
 func parseGoModule(goModPath string) string {
@@ -160,12 +168,26 @@ func parseProto(path string) ([]service, error) {
 		block := content[start:end]
 
 		var methods []rpcMethod
+		// Try to match RPCs with HTTP annotations first
+		matched := make(map[string]bool)
 		for _, m := range reRPC.FindAllStringSubmatch(block, -1) {
+			matched[m[1]] = true
 			methods = append(methods, rpcMethod{
 				Name:     m[1],
 				Request:  m[2],
 				Response: m[3],
+				HTTPPath: m[4],
 			})
+		}
+		// Fallback: match RPCs without HTTP annotations
+		for _, m := range reRPCSimple.FindAllStringSubmatch(block, -1) {
+			if !matched[m[1]] {
+				methods = append(methods, rpcMethod{
+					Name:     m[1],
+					Request:  m[2],
+					Response: m[3],
+				})
+			}
 		}
 
 		dirName := strings.TrimSuffix(svcName, "Service")
@@ -197,6 +219,21 @@ func parseGoPackage(content string) (goPackage, alias string) {
 	}
 	parts := strings.Split(raw, "/")
 	return raw, parts[len(parts)-1]
+}
+
+// httpPathToFileName converts an HTTP path to a file name.
+// Example: "/api/v1/auth/refresh" → "api_v1_auth_refresh"
+func httpPathToFileName(path string) string {
+	path = strings.TrimPrefix(path, "/")
+	// Remove path parameters like {provider}
+	path = rePathParam.ReplaceAllString(path, "")
+	path = strings.ReplaceAll(path, "/", "_")
+	// Clean up double underscores and trailing underscores
+	for strings.Contains(path, "__") {
+		path = strings.ReplaceAll(path, "__", "_")
+	}
+	path = strings.TrimSuffix(path, "_")
+	return path
 }
 
 // CamelToSnake converts CamelCase to snake_case.
