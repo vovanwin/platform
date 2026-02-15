@@ -10,10 +10,11 @@ import (
 )
 
 type rpcMethod struct {
-	Name     string
-	Request  string
-	Response string
-	HTTPPath string
+	Name       string
+	Request    string
+	Response   string
+	HTTPPath   string
+	HTTPMethod string // get, post, put, delete, patch
 }
 
 type service struct {
@@ -85,7 +86,7 @@ func Run(root, apiDir, outputDir, serverPkg string) error {
 			for _, m := range svc.Methods {
 				var fileName string
 				if m.HTTPPath != "" {
-					fileName = httpPathToFileName(m.HTTPPath) + ".go"
+					fileName = httpPathToFileName(m.HTTPPath) + "_" + m.HTTPMethod + ".go"
 				} else {
 					fileName = CamelToSnake(m.Name) + ".go"
 				}
@@ -124,7 +125,7 @@ func absPath(root, p string) string {
 var (
 	reGoPackage = regexp.MustCompile(`option\s+go_package\s*=\s*"([^"]+)"`)
 	reService   = regexp.MustCompile(`service\s+(\w+)\s*\{`)
-	reRPC       = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*([\w.]+)\s*\)\s*returns\s*\(\s*([\w.]+)\s*\)\s*\{[^}]*?(?:get|post|put|delete|patch)\s*:\s*"([^"]+)"[^}]*\}`)
+	reRPC       = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*([\w.]+)\s*\)\s*returns\s*\(\s*([\w.]+)\s*\)\s*\{[^}]*?(get|post|put|delete|patch)\s*:\s*"([^"]+)"[^}]*\}`)
 	reRPCSimple = regexp.MustCompile(`rpc\s+(\w+)\s*\(\s*([\w.]+)\s*\)\s*returns\s*\(\s*([\w.]+)\s*\)`)
 	reModule    = regexp.MustCompile(`(?m)^module\s+(\S+)`)
 	rePathParam = regexp.MustCompile(`\{[^}]+\}`)
@@ -173,10 +174,11 @@ func parseProto(path string) ([]service, error) {
 		for _, m := range reRPC.FindAllStringSubmatch(block, -1) {
 			matched[m[1]] = true
 			methods = append(methods, rpcMethod{
-				Name:     m[1],
-				Request:  m[2],
-				Response: m[3],
-				HTTPPath: m[4],
+				Name:       m[1],
+				Request:    m[2],
+				Response:   m[3],
+				HTTPMethod: m[4],
+				HTTPPath:   m[5],
 			})
 		}
 		// Fallback: match RPCs without HTTP annotations

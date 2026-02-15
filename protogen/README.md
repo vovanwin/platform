@@ -58,10 +58,15 @@ protogen -api ./proto -output ./internal/handlers
 ```
 internal/controller/
   user/
-    controller.go    — структура UserGRPCServer с зависимостями
-    module.go        — fx-модуль для DI-регистрации
-    get_user.go      — заглушка метода GetUser
-    create_user.go   — заглушка метода CreateUser
+    0_controller.go    — структура UserGRPCServer с зависимостями
+    0_module.go        — fx-модуль для DI-регистрации
+    get_user.go        — заглушка метода GetUser
+    create_user.go     — заглушка метода CreateUser
+```
+
+Если proto содержит HTTP-аннотации (`google.api.http`), имена файлов методов формируются из HTTP-пути:
+```
+  api_v1_users_get.go    — из path "/api/v1/users/get"
 ```
 
 Генератор **не перезаписывает** существующие файлы — создаёт только отсутствующие.
@@ -69,7 +74,7 @@ internal/controller/
 ### Пример сгенерированного контроллера
 
 ```go
-// controller.go
+// 0_controller.go
 type UserGRPCServer struct {
     users.UnimplementedUserServiceServer
 }
@@ -84,7 +89,7 @@ func (s *UserGRPCServer) GetUser(ctx context.Context, req *users.GetUserRequest)
 ### Пример сгенерированного модуля
 
 ```go
-// module.go
+// 0_module.go
 func NewModule() fx.Option {
     return fx.Module("user",
         fx.Provide(NewUserGRPCServer),
